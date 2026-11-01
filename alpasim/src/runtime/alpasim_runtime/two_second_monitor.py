@@ -81,7 +81,7 @@ class TwoSecondMonitor:
             return  # warm-up: EGO is still following the recording
 
         ego = self.poses["EGO"][now]
-        before = self.poses["EGO"].get(now - 100_000, ego)
+        before = self.poses["EGO"][now - 100_000]
         speed = math.dist(ego[:2], before[:2]) / 0.1
 
         alerts = []
