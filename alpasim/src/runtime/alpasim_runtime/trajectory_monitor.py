@@ -21,9 +21,12 @@ only writes alerts; it never changes what the car does.
 
 Output, next to rollout.asl, one line per trajectory:
     trajectory_alerts.jsonl
-    {"time_s": 5.4, "now": [...], "waypoint 1": [...], "waypoint 2": [...]}
-    Each list holds actor ids. null means that moment is after the end of the
-    simulation, so it was not checked.
+    {"time_s": 15.1, "now": [], "waypoint 1": [{"id": "81", "label": "car", "gap_m": 3.4}],
+     "waypoint 2": [...]}
+
+    label   what the actor is (car, truck, pedestrian, ...)
+    gap_m   distance between EGO and the actor at that moment, in meters
+    null means that moment is after the end of the simulation, so it was not checked.
 """
 
 import bisect
@@ -50,6 +53,7 @@ class TrajectoryMonitor:
         self.lanes = lanes_from_map(vector_map)
         self.end_us = end_us  # last simulated time
         self.sizes = {}  # actor id -> (length, width)
+        self.labels = {}  # actor id -> what the actor is (car, truck, ...)
         self.parked = set()  # ids of actors that never move
         self.recorded = {}  # actor id -> Track of its recorded drive
         self.rig_to_box = (0.0, 0.0)  # offset from where Alpamayo plans to EGO's center
@@ -67,10 +71,11 @@ class TrajectoryMonitor:
     def handle(self, entry):
         kind = entry.WhichOneof("log_entry")
 
-        if kind == "rollout_metadata":  # at the start: sizes and warm-up length
+        if kind == "rollout_metadata":  # at the start: sizes, labels and warm-up length
             metadata = entry.rollout_metadata
             for actor in metadata.actor_definitions.actor_aabb:
                 self.sizes[actor.actor_id] = (actor.aabb.size_x, actor.aabb.size_y)
+                self.labels[actor.actor_id] = actor.actor_label
             offset = metadata.transform_ego_coords_rig_to_aabb.vec
             self.rig_to_box = (offset.x, offset.y)
             self.warmup_us = metadata.force_gt_duration
@@ -110,24 +115,32 @@ class TrajectoryMonitor:
             alerts = []
             if ego.at(t) is not None:
                 ego_zone = zone(ego, t, *self.sizes["EGO"])
-                for actor_id, track in self.recorded.items():
+                ego_outline = actor_box(*ego.at(t), *self.sizes["EGO"])
+                for actor_id, track in sorted(self.recorded.items()):
                     if track.at(now) is None or track.at(t) is None:
                         continue  # the actor isn't in the scene at one of these times
                     if self.is_ignored(actor_id, track.at(now), ego.at(now)):
                         continue
                     if ego_zone.intersects(zone(track, t, *self.sizes[actor_id])):
-                        alerts.append(actor_id)
-            row[moment] = sorted(alerts)
+                        outline = actor_box(*track.at(t), *self.sizes[actor_id])
+                        alerts.append(
+                            {
+                                "id": actor_id,
+                                "label": self.labels[actor_id],
+                                "gap_m": round(ego_outline.distance(outline), 1),
+                            }
+                        )
+            row[moment] = alerts
 
         with open(self.alerts_path, "a") as f:
             f.write(json.dumps(row) + "\n")
         for moment in MOMENTS:
-            if row[moment]:
+            for alert in row[moment] or []:
                 logger.info(
                     "TrajectoryMonitor: %.1f s ALERT (%s) %s",
                     row["time_s"],
                     moment,
-                    row[moment],
+                    alert,
                 )
 
     def ego_track(self, trajectory):

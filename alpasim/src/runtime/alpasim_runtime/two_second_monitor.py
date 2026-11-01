@@ -12,7 +12,14 @@ The monitor is added to AlpaSim's list of log receivers in event_loop.py. It
 only writes alerts; it never changes what the car does.
 
 Output, next to rollout.asl, one line per trajectory:
-    two_second_alerts.jsonl    {"time_s": 5.4, "alerts": ["<actor id>", ...]}
+    two_second_alerts.jsonl
+    {"time_s": 15.1, "ego_speed_mps": 11.8,
+     "alerts": [{"id": "81", "label": "car", "gap_m": 14.2, "gap_s": 1.2}]}
+
+    ego_speed_mps  EGO's speed, in m/s
+    label          what the actor is (car, truck, pedestrian, ...)
+    gap_m          distance between EGO and the actor, in meters
+    gap_s          gap_m / EGO's speed: how many seconds behind the actor EGO is
 """
 
 import json
@@ -36,6 +43,7 @@ class TwoSecondMonitor:
         self.alerts_path = os.path.join(rollout_dir, "two_second_alerts.jsonl")
         self.lanes = lanes_from_map(vector_map)
         self.sizes = {}  # actor id -> (length, width)
+        self.labels = {}  # actor id -> what the actor is (car, truck, ...)
         self.parked = set()  # ids of actors that never move
         self.warmup_us = 0
         self.start_us = None
@@ -52,9 +60,10 @@ class TwoSecondMonitor:
     def handle(self, entry):
         kind = entry.WhichOneof("log_entry")
 
-        if kind == "rollout_metadata":  # at the start: sizes and warm-up length
+        if kind == "rollout_metadata":  # at the start: sizes, labels and warm-up length
             for actor in entry.rollout_metadata.actor_definitions.actor_aabb:
                 self.sizes[actor.actor_id] = (actor.aabb.size_x, actor.aabb.size_y)
+                self.labels[actor.actor_id] = actor.actor_label
             self.warmup_us = entry.rollout_metadata.force_gt_duration
 
         elif kind == "traffic_session_request":  # at the start: which actors are parked
@@ -87,20 +96,31 @@ class TwoSecondMonitor:
         alerts = []
         if speed > STOPPED_SPEED:
             area = area_ahead(*ego, speed, *self.sizes["EGO"], SECONDS)
-            for actor_id, poses in self.poses.items():
+            ego_outline = actor_box(*ego, *self.sizes["EGO"])
+            for actor_id, poses in sorted(self.poses.items()):
                 if actor_id == "EGO" or now not in poses:
                     continue
                 pose = poses[now]
                 if self.is_ignored(actor_id, pose, ego):
                     continue
-                if area.intersects(actor_box(*pose, *self.sizes[actor_id])):
-                    alerts.append(actor_id)
+                outline = actor_box(*pose, *self.sizes[actor_id])
+                if area.intersects(outline):
+                    gap = ego_outline.distance(outline)
+                    alerts.append(
+                        {
+                            "id": actor_id,
+                            "label": self.labels[actor_id],
+                            "gap_m": round(gap, 1),
+                            "gap_s": round(gap / speed, 2),
+                        }
+                    )
 
         time_s = round((now - self.start_us) / 1e6, 2)
+        row = {"time_s": time_s, "ego_speed_mps": round(speed, 1), "alerts": alerts}
         with open(self.alerts_path, "a") as f:
-            f.write(json.dumps({"time_s": time_s, "alerts": sorted(alerts)}) + "\n")
-        if alerts:
-            logger.info("TwoSecondMonitor: %.1f s ALERT %s", time_s, sorted(alerts))
+            f.write(json.dumps(row) + "\n")
+        for alert in alerts:
+            logger.info("TwoSecondMonitor: %.1f s ALERT %s", time_s, alert)
 
     def is_ignored(self, actor_id, pose, ego):
         """A parked car outside the driving lanes, or an actor behind EGO's rear bumper."""
