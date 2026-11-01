@@ -24,6 +24,8 @@ from alpasim_runtime.camera_catalog import CameraCatalog
 from alpasim_runtime.config import PhysicsUpdateMode
 from alpasim_runtime.consistency_monitor import ConsistencyMonitor
 from alpasim_runtime.delay_buffer import DelayBuffer
+from alpasim_runtime.two_second_monitor import TwoSecondMonitor
+from alpasim_runtime.trajectory_monitor import TrajectoryMonitor
 from alpasim_runtime.events.base import (
     EndSimulationException,
     EventQueue,
@@ -171,8 +173,24 @@ class EventBasedRollout:
             vector_map=self.unbound.vector_map,
         )
 
+        # Live safety monitors: two more receivers of the log entries. They only write
+        # alerts next to rollout.asl; they never change what the car does.
+        self.two_second_monitor = TwoSecondMonitor(
+            self._rollout_dir(), vector_map=self.unbound.vector_map
+        )
+        self.trajectory_monitor = TrajectoryMonitor(
+            self._rollout_dir(),
+            vector_map=self.unbound.vector_map,
+            end_us=int(self.unbound.control_timestamps_us[-1]),
+        )
+
         self.broadcaster = MessageBroadcaster(
-            handlers=[asl_log_writer, self._runtime_evaluator],
+            handlers=[
+                asl_log_writer,
+                self._runtime_evaluator,
+                self.two_second_monitor,
+                self.trajectory_monitor,
+            ],
         )
 
     def _rollout_dir(self) -> str:
